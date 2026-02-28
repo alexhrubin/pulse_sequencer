@@ -45,7 +45,7 @@ MAX_CYCLE_TYPES  = 8
 MAX_SLOTS        = 16
 MAX_SEQ_LEN      = 32
 NUM_MARKERS      = 3
-BRAM_WORDS_PER_CYCLE = 128   # power-of-2 block size; 105 used, 23 reserved
+BRAM_WORDS_PER_CYCLE = 256   # power-of-2 block size; 137 used, 119 reserved
 
 # ---------------------------------------------------------------------------
 # Avalon register word addresses (multiply by 4 for byte offset)
@@ -66,11 +66,12 @@ OFF_SEQ_LIMIT = 0
 OFF_RP        = 1
 OFF_RO        = 1 + MAX_SLOTS * 2    # 33
 OFF_MW        = 1 + MAX_SLOTS * 4    # 65
-OFF_SYNC_ST   = 1 + MAX_SLOTS * 6    # 97
-OFF_SYNC_DUR  = 2 + MAX_SLOTS * 6    # 98
-OFF_MK_BASE   = 3 + MAX_SLOTS * 6    # 99
+OFF_VETO      = 1 + MAX_SLOTS * 6    # 97
+OFF_SYNC_ST   = 1 + MAX_SLOTS * 8    # 129
+OFF_SYNC_DUR  = 2 + MAX_SLOTS * 8    # 130
+OFF_MK_BASE   = 3 + MAX_SLOTS * 8    # 131
 
-WORDS_PER_CYCLE = 1 + MAX_SLOTS * 6 + 2 + NUM_MARKERS * 2   # 105
+WORDS_PER_CYCLE = 1 + MAX_SLOTS * 8 + 2 + NUM_MARKERS * 2   # 137
 
 
 # ---------------------------------------------------------------------------
@@ -101,15 +102,17 @@ class CycleTypeDef:
     rp: List[PulseSlot] = field(default_factory=list)  # up to MAX_SLOTS
     ro: List[PulseSlot] = field(default_factory=list)
     mw: List[PulseSlot] = field(default_factory=list)
-    sync: PulseSlot = field(default_factory=PulseSlot) # single slot (dur=0→disabled)
-    markers: List[PulseSlot] = field(                  # one per marker output
+    veto: List[PulseSlot] = field(default_factory=list) # PicoHarp veto windows
+    sync: PulseSlot = field(default_factory=PulseSlot)  # single slot (dur=0→disabled)
+    markers: List[PulseSlot] = field(                   # one per marker output
         default_factory=lambda: [PulseSlot() for _ in range(NUM_MARKERS)])
 
     def validate(self, name: str = "cycle") -> list[str]:
         errs = []
         if self.seq_limit < 1:
             errs.append(f"{name}: seq_limit must be >= 1")
-        for ch_name, slots in [("rp", self.rp), ("ro", self.ro), ("mw", self.mw)]:
+        for ch_name, slots in [("rp", self.rp), ("ro", self.ro),
+                                ("mw", self.mw), ("veto", self.veto)]:
             if len(slots) > MAX_SLOTS:
                 errs.append(f"{name}.{ch_name}: too many slots (max {MAX_SLOTS})")
             for i, s in enumerate(slots):
@@ -122,7 +125,7 @@ class CycleTypeDef:
     def to_words(self) -> list[int]:
         """Serialize to a flat list of WORDS_PER_CYCLE 32-bit integers."""
         words = [self.seq_limit]
-        for slots in [self.rp, self.ro, self.mw]:
+        for slots in [self.rp, self.ro, self.mw, self.veto]:
             for s in range(MAX_SLOTS):
                 slot = slots[s] if s < len(slots) else PulseSlot()
                 words.append(slot.start)
@@ -147,6 +150,7 @@ class CycleTypeDef:
             rp=[slot(s) for s in d.get("rp", [])],
             ro=[slot(s) for s in d.get("ro", [])],
             mw=[slot(s) for s in d.get("mw", [])],
+            veto=[slot(s) for s in d.get("veto", [])],
             sync=slot(d.get("sync")),
             markers=[slot(d.get(f"marker{i}")) for i in range(NUM_MARKERS)],
         )

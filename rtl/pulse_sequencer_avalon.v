@@ -7,7 +7,8 @@
 //     each specifying a cycle type index and a repeat count
 //   - Up to MAX_CYCLE_TYPES unique cycle type definitions stored in BRAM
 //   - Up to MAX_SLOTS pulse slots per channel per cycle type
-//   - Outputs: RP AOM, RO AOM, MW switch, sync (active-low), PicoHarp markers
+//   - Outputs: RP AOM, RO AOM, MW switch, veto, sync (active-low),
+//              PicoHarp markers
 //   - Double-buffered config prefetch: zero dead-time between cycle types
 //     (requires seq_limit >= WORDS_PER_CYCLE+2 cycles; see notes below)
 //
@@ -25,17 +26,18 @@
 //   0x10..0x2F  SEQ_TYPE[0..31]   cycle-type index for each sequence position
 //   0x30..0x4F  SEQ_COUNT[0..31]  repeat count for each sequence position
 //
-// BRAM layout (128 words per cycle type, base = cycle_type_index * 128):
+// BRAM layout (256 words per cycle type, base = cycle_type_index * 256):
 //   +0          seq_limit
 //   +1..+32     rp_start[0],rp_dur[0], rp_start[1],rp_dur[1], ... [15]
 //   +33..+64    ro_start[0],ro_dur[0], ...                          [15]
 //   +65..+96    mw_start[0],mw_dur[0], ...                          [15]
-//   +97         sync_start
-//   +98         sync_dur        (0 = disabled for this cycle)
-//   +99,+100    mk0_start, mk0_dur   (dur=0 = disabled)
-//   +101,+102   mk1_start, mk1_dur
-//   +103,+104   mk2_start, mk2_dur
-//   +105..+127  reserved
+//   +97..+128   veto_start[0],veto_dur[0], ...                      [15]
+//   +129        sync_start
+//   +130        sync_dur        (0 = disabled for this cycle)
+//   +131,+132   mk0_start, mk0_dur   (dur=0 = disabled)
+//   +133,+134   mk1_start, mk1_dur
+//   +135,+136   mk2_start, mk2_dur
+//   +137..+255  reserved
 //
 // Double-buffered prefetch notes:
 //   Two config banks (A and B) alternate: one is active (drives comparators),
@@ -66,6 +68,7 @@ module pulse_sequencer_avalon #(
     output reg         aom_rp_out,                  // RP AOM (active-high)
     output reg         aom_ro_out,                  // RO AOM (active-high)
     output reg         mw_out,                      // MW switch (active-high)
+    output reg         veto_out,                    // PicoHarp veto (active-high)
     output reg         sync_out,                    // Sync (active-low, idles high)
     output reg [NUM_MARKERS-1:0] marker_out         // PicoHarp markers (active-high)
 );
@@ -73,17 +76,18 @@ module pulse_sequencer_avalon #(
 // ---------------------------------------------------------------------------
 // Derived constants
 // ---------------------------------------------------------------------------
-localparam BRAM_DEPTH      = MAX_CYCLE_TYPES * 128;       // 1024
-localparam WORDS_PER_CYCLE = 1 + MAX_SLOTS*6 + 2 + NUM_MARKERS*2; // 105
+localparam BRAM_DEPTH      = MAX_CYCLE_TYPES * 256;       // 2048
+localparam WORDS_PER_CYCLE = 1 + MAX_SLOTS*8 + 2 + NUM_MARKERS*2; // 137
 
 // BRAM word offsets within a cycle-type block
 localparam OFF_SEQ_LIMIT = 0;
 localparam OFF_RP        = 1;               // [+1..+32]
 localparam OFF_RO        = 1 + MAX_SLOTS*2; // [+33..+64]
 localparam OFF_MW        = 1 + MAX_SLOTS*4; // [+65..+96]
-localparam OFF_SYNC_ST   = 1 + MAX_SLOTS*6; // +97
-localparam OFF_SYNC_DUR  = 2 + MAX_SLOTS*6; // +98
-localparam OFF_MK_BASE   = 3 + MAX_SLOTS*6; // +99 (mk0_start), +100 (mk0_dur), ...
+localparam OFF_VETO      = 1 + MAX_SLOTS*6; // [+97..+128]
+localparam OFF_SYNC_ST   = 1 + MAX_SLOTS*8; // +129
+localparam OFF_SYNC_DUR  = 2 + MAX_SLOTS*8; // +130
+localparam OFF_MK_BASE   = 3 + MAX_SLOTS*8; // +131 (mk0_start), +132 (mk0_dur), ...
 
 // FSM states
 localparam ST_IDLE    = 2'd0;
@@ -235,14 +239,14 @@ always @(posedge clk or negedge reset_n) begin : prefetch_loader
         end
     end else begin
         if (prefetch_req) begin
-            load_base    <= {prefetch_type, 7'd0}; // type * 128
-            bram_pb_addr <= {prefetch_type, 7'd0};
+            load_base    <= {prefetch_type, 8'd0}; // type * 256
+            bram_pb_addr <= {prefetch_type, 8'd0};
             load_ptr     <= 8'd0;
             prefetch_busy <= 1'b1;
         end else if (prefetch_busy) begin
             // Advance read address (data appears one cycle later)
             if (load_ptr < WORDS_PER_CYCLE)
-                bram_pb_addr <= load_base + load_ptr[6:0] + 1;
+                bram_pb_addr <= load_base + load_ptr + 1;
 
             // Capture data into shadow bank (valid from cycle 1 onward)
             if (load_ptr >= 1 && load_ptr <= WORDS_PER_CYCLE)
@@ -260,7 +264,7 @@ end
 // Pulse comparators (combinatorial, reading from active bank)
 // Outputs are registered in the FSM to give a clean 1-cycle latency.
 // ---------------------------------------------------------------------------
-reg rp_c, ro_c, mw_c, sync_c;
+reg rp_c, ro_c, mw_c, veto_c, sync_c;
 reg [NUM_MARKERS-1:0] mk_c;
 
 always @(*) begin : comparators
@@ -268,6 +272,7 @@ always @(*) begin : comparators
     rp_c   = 1'b0;
     ro_c   = 1'b0;
     mw_c   = 1'b0;
+    veto_c = 1'b0;
     sync_c = 1'b0;
     mk_c   = {NUM_MARKERS{1'b0}};
 
@@ -289,6 +294,12 @@ always @(*) begin : comparators
             timer <  cfg[active_bank][OFF_MW + s*2] +
                      cfg[active_bank][OFF_MW + s*2 + 1])
             mw_c = 1'b1;
+
+        if (cfg[active_bank][OFF_VETO + s*2 + 1] != 32'd0 &&
+            timer >= cfg[active_bank][OFF_VETO + s*2] &&
+            timer <  cfg[active_bank][OFF_VETO + s*2] +
+                     cfg[active_bank][OFF_VETO + s*2 + 1])
+            veto_c = 1'b1;
     end
 
     sync_c = (cfg[active_bank][OFF_SYNC_DUR] != 32'd0 &&
@@ -319,6 +330,7 @@ task deassert_outputs;
         aom_rp_out <= 1'b0;
         aom_ro_out <= 1'b0;
         mw_out     <= 1'b0;
+        veto_out   <= 1'b0;
         sync_out   <= 1'b1;
         marker_out <= {NUM_MARKERS{1'b0}};
     end
@@ -410,6 +422,7 @@ always @(posedge clk or negedge reset_n) begin : sequencer
                     aom_rp_out <= rp_c;
                     aom_ro_out <= ro_c;
                     mw_out     <= mw_c;
+                    veto_out   <= veto_c;
                     sync_out   <= ~sync_c;
                     marker_out <= mk_c;
 
