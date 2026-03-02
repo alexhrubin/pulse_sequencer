@@ -51,13 +51,30 @@ except ImportError:
 
 # Reuse waveform helpers from the main visualiser
 from plot_sequence import (
-    _waveform_xy,
     _rgba,
     CHANNELS,
     CH_SPACING,
     CH_HEIGHT,
     CT_COLORS,
+    add_channel_traces,
+    configure_waveform_axes,
+    _add_sequence_strip,
 )
+
+# ---------------------------------------------------------------------------
+# CSV column name ↔ CHANNELS key mappings
+# ---------------------------------------------------------------------------
+_COL_TO_CH_KEY = {
+    "rp":   "rp",
+    "ro":   "ro",
+    "mw":   "mw",
+    "veto": "veto",
+    "sync": "sync",
+    "mk0":  "marker0",
+    "mk1":  "marker1",
+    "mk2":  "marker2",
+}
+_CH_KEY_TO_COL = {v: k for k, v in _COL_TO_CH_KEY.items()}
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -207,15 +224,9 @@ def build_figure(
     for key in signals:
         signals[key] = signals[key][:keep]
 
-    # Map CSV column names to CHANNELS keys
-    _col_to_ch_key = {
-        "rp": "rp", "ro": "ro", "mw": "mw", "veto": "veto",
-        "sync": "sync", "mk0": "marker0", "mk1": "marker1", "mk2": "marker2",
-    }
-
     # Hide completely-inactive channels
     active_keys = {
-        _col_to_ch_key[col]
+        _COL_TO_CH_KEY[col]
         for col, vals in signals.items()
         if any(v for v in vals)
     }
@@ -294,52 +305,12 @@ def build_figure(
             cursor_us += dur_us
 
     # ── Add waveform traces ───────────────────────────────────────────────────
-    for ch_idx, (key, label, color) in enumerate(channels):
-        y_base = (n_ch - 1 - ch_idx) * CH_SPACING
-
-        # Find which CSV column corresponds to this channel key
-        col_name = next(
-            (col for col, ck in _col_to_ch_key.items() if ck == key), None
-        )
-        if col_name is None or col_name not in signals:
-            continue
-
-        pulses_us = _series_to_pulses(times_ns, signals[col_name])
-        x, y      = _waveform_xy(pulses_us, period_us, y_base)
-
-        # Main visual trace — no hover
-        fig.add_trace(go.Scatter(
-            x=x, y=y,
-            mode="lines",
-            name=label,
-            legendgroup=key,
-            line=dict(color=color, width=2),
-            fill="toself",
-            fillcolor=_rgba(color, 0.20),
-            hoverinfo="skip",
-        ))
-        # Dense invisible markers inside each pulse.
-        # hovermode="closest" snaps to these reliably; hovertemplate works on markers.
-        if pulses_us:
-            hxs, hys, htmpl = [], [], []
-            for s_us, d_us in pulses_us:
-                n    = max(3, min(50, int(d_us * clock_mhz / 5)))
-                tmpl = (f"<b>{label}</b><br>"
-                        f"{s_us:.4f} → {s_us + d_us:.4f} µs  ({d_us:.4f} µs)"
-                        "<extra></extra>")
-                for i in range(n):
-                    hxs.append(s_us + (i + 0.5) * d_us / n)
-                    hys.append(y_base + CH_HEIGHT / 2)
-                    htmpl.append(tmpl)
-            fig.add_trace(go.Scatter(
-                x=hxs, y=hys,
-                mode="markers",
-                marker=dict(size=8, color=_rgba(color, 0.01)),
-                hovertemplate=htmpl,
-                name=label,
-                legendgroup=key,
-                showlegend=False,
-            ))
+    pulses_by_key = {
+        key: (_series_to_pulses(times_ns, signals[_CH_KEY_TO_COL[key]])
+              if _CH_KEY_TO_COL.get(key) in signals else [])
+        for key, *_ in channels
+    }
+    add_channel_traces(fig, channels, pulses_by_key, period_us, clock_mhz)
 
     return fig
 
@@ -396,17 +367,12 @@ def build_figure_per_cycle(
     n_ct = len(unique_cts)
 
     # ── Active channels (globally across whole CSV) ───────────────────────────
-    _col_to_ch_key = {
-        "rp": "rp", "ro": "ro", "mw": "mw", "veto": "veto",
-        "sync": "sync", "mk0": "marker0", "mk1": "marker1", "mk2": "marker2",
-    }
     active_keys = {
-        _col_to_ch_key[col]
+        _COL_TO_CH_KEY[col]
         for col, vals in signals.items()
         if any(vals)
     }
     channels = [ch for ch in CHANNELS if ch[0] in active_keys]
-    n_ch     = len(channels)
 
     # ── Subplot layout ────────────────────────────────────────────────────────
     subplot_titles = []
@@ -446,118 +412,26 @@ def build_figure_per_cycle(
             for k, vals in signals.items()
         }
 
-        for ch_idx, (key, label, color) in enumerate(channels):
-            y_base   = (n_ch - 1 - ch_idx) * CH_SPACING
-            col_name = next(
-                (col for col, ck in _col_to_ch_key.items() if ck == key), None
-            )
-            if col_name is None:
-                continue
-
-            pulses_us = _series_to_pulses(slice_times, slice_sigs[col_name])
-            x, y      = _waveform_xy(pulses_us, period_us_i, y_base)
-
-            # Main visual trace — no hover
-            fig.add_trace(go.Scatter(
-                x=x, y=y,
-                mode="lines",
-                name=label,
-                legendgroup=key,
-                showlegend=(subplot_i == 0),
-                line=dict(color=color, width=2),
-                fill="toself",
-                fillcolor=_rgba(color, 0.20),
-                hoverinfo="skip",
-            ), row=row, col=1)
-
-            # Dense invisible markers inside each pulse for reliable hover
-            if pulses_us:
-                hxs, hys, htmpl = [], [], []
-                for s_us, d_us in pulses_us:
-                    n    = max(3, min(50, int(d_us * clock_mhz / 5)))
-                    tmpl = (f"<b>{label}</b><br>"
-                            f"{s_us:.4f} → {s_us + d_us:.4f} µs  ({d_us:.4f} µs)"
-                            "<extra></extra>")
-                    for i in range(n):
-                        hxs.append(s_us + (i + 0.5) * d_us / n)
-                        hys.append(y_base + CH_HEIGHT / 2)
-                        htmpl.append(tmpl)
-                fig.add_trace(go.Scatter(
-                    x=hxs, y=hys,
-                    mode="markers",
-                    marker=dict(size=8, color=_rgba(color, 0.01)),
-                    hovertemplate=htmpl,
-                    name=label,
-                    legendgroup=key,
-                    showlegend=False,
-                ), row=row, col=1)
-
-        tick_vals  = [(n_ch - 1 - i) * CH_SPACING + CH_HEIGHT / 2 for i in range(n_ch)]
-        tick_texts = [label for _, label, _ in channels]
-        y_range    = [-0.8, (n_ch - 1) * CH_SPACING + CH_HEIGHT + 0.8]
-
-        fig.update_yaxes(
-            tickmode="array", tickvals=tick_vals, ticktext=tick_texts,
-            tickfont=dict(size=11), range=y_range,
-            showgrid=True, gridcolor="#e4e4e4",
-            zeroline=False, showline=True, linecolor="#ccc",
+        pulses_by_key = {
+            key: (_series_to_pulses(slice_times, slice_sigs[_CH_KEY_TO_COL[key]])
+                  if _CH_KEY_TO_COL.get(key) else [])
+            for key, *_ in channels
+        }
+        add_channel_traces(
+            fig, channels, pulses_by_key, period_us_i, clock_mhz,
             row=row, col=1,
+            showlegend=(subplot_i == 0),
         )
-        fig.update_xaxes(
-            title_text="Time (µs)", range=[0, period_us_i],
-            showgrid=True, gridcolor="#e4e4e4",
-            showline=True, linecolor="#ccc",
-            row=row, col=1,
-        )
+        configure_waveform_axes(fig, channels, period_us_i, row=row, col=1)
 
     # ── Sequence strip (bottom row) ───────────────────────────────────────────
-    strip_row  = n_rows
-    cursor_us  = 0.0
-    for step in seq_cfg.sequence:
-        ct_idx    = step.cycle_type_index
-        ct_dur_us = seq_cfg.cycle_types[ct_idx].seq_limit / clock_mhz
-        color     = CT_COLORS[ct_idx % len(CT_COLORS)]
-        for _ in range(step.count):
-            x0, x1 = cursor_us, cursor_us + ct_dur_us
-            mid_x   = (x0 + x1) / 2
-            fig.add_trace(go.Scatter(
-                x=[x0, x1, x1, x0, x0],
-                y=[0.05, 0.05, 0.95, 0.95, 0.05],
-                mode="lines",
-                fill="toself",
-                fillcolor=_rgba(color, 0.80),
-                line=dict(color="#555", width=1),
-                name=f"CT{ct_idx}",
-                legendgroup=f"strip_ct{ct_idx}",
-                showlegend=False,
-                hovertemplate=(
-                    f"<b>CT{ct_idx}</b><br>"
-                    f"start = {x0:.4f} µs<br>"
-                    f"end   = {x1:.4f} µs<br>"
-                    f"dur   = {ct_dur_us:.4f} µs<extra></extra>"
-                ),
-            ), row=strip_row, col=1)
-            fig.add_trace(go.Scatter(
-                x=[mid_x], y=[0.5],
-                mode="text",
-                text=[f"CT{ct_idx}"],
-                textfont=dict(size=10, color="#111", family="monospace"),
-                showlegend=False,
-                hoverinfo="skip",
-            ), row=strip_row, col=1)
-            cursor_us += ct_dur_us
-
-    fig.update_yaxes(
-        range=[0, 1], showticklabels=False,
-        showgrid=False, zeroline=False,
-        showline=True, linecolor="#ccc",
-        row=strip_row, col=1,
-    )
-    fig.update_xaxes(
-        title_text="Time (µs)", range=[0, sc_dur_us],
-        showgrid=True, gridcolor="#e4e4e4",
-        showline=True, linecolor="#ccc",
-        row=strip_row, col=1,
+    _add_sequence_strip(
+        fig,
+        row=n_rows,
+        sequence=[{"cycle_type_index": s.cycle_type_index, "count": s.count}
+                  for s in seq_cfg.sequence],
+        cycle_types=[{"seq_limit": ct.seq_limit} for ct in seq_cfg.cycle_types],
+        us_per_cyc=1.0 / clock_mhz,
     )
 
     # ── Global layout ─────────────────────────────────────────────────────────

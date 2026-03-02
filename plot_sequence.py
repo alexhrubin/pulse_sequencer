@@ -201,6 +201,121 @@ def _waveform_xy(
 
 
 # ---------------------------------------------------------------------------
+# Reusable waveform trace builders
+# ---------------------------------------------------------------------------
+
+def add_channel_traces(
+    fig: go.Figure,
+    channels: list,
+    pulses_by_channel_us: dict,
+    period_us: float,
+    clock_mhz: float,
+    *,
+    row: int | None = None,
+    col: int | None = None,
+    showlegend: bool = True,
+) -> None:
+    """
+    Add waveform traces for *channels* to *fig*.
+
+    Each active channel gets:
+      - a visual Scatter trace (fill='toself', hoverinfo='skip')
+      - a dense invisible marker trace for reliable hover tooltips
+
+    pulses_by_channel_us maps channel key → [(start_us, dur_us), ...]
+    Pass row/col to target a specific make_subplots cell; omit for a plain Figure.
+    """
+    n_ch = len(channels)
+    _pos = {"row": row, "col": col} if row is not None else {}
+
+    for ch_idx, (key, label, color) in enumerate(channels):
+        y_base    = (n_ch - 1 - ch_idx) * CH_SPACING
+        pulses_us = pulses_by_channel_us.get(key, [])
+        x, y      = _waveform_xy(pulses_us, period_us, y_base)
+
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=y,
+                mode="lines",
+                name=label,
+                legendgroup=key,
+                showlegend=showlegend,
+                line=dict(color=color, width=2),
+                fill="toself",
+                fillcolor=_rgba(color, 0.20),
+                hoverinfo="skip",
+            ),
+            **_pos,
+        )
+
+        if pulses_us:
+            hxs, hys, htmpl = [], [], []
+            for s_us, d_us in pulses_us:
+                n    = max(3, min(50, round(d_us * clock_mhz / 5)))
+                tmpl = (
+                    f"<b>{label}</b><br>"
+                    f"{s_us:.4f} → {s_us + d_us:.4f} µs"
+                    f"  ({round(d_us * clock_mhz)} cyc)<extra></extra>"
+                )
+                for i in range(n):
+                    hxs.append(s_us + (i + 0.5) * d_us / n)
+                    hys.append(y_base + CH_HEIGHT / 2)
+                    htmpl.append(tmpl)
+            fig.add_trace(
+                go.Scatter(
+                    x=hxs, y=hys,
+                    mode="markers",
+                    marker=dict(size=8, color=_rgba(color, 0.01)),
+                    hovertemplate=htmpl,
+                    name=label,
+                    legendgroup=key,
+                    showlegend=False,
+                ),
+                **_pos,
+            )
+
+
+def configure_waveform_axes(
+    fig: go.Figure,
+    channels: list,
+    period_us: float,
+    row: int,
+    col: int,
+) -> None:
+    """Configure y-axis labels and x-axis range for one subplot row."""
+    n_ch       = len(channels)
+    tick_vals  = [(n_ch - 1 - i) * CH_SPACING + CH_HEIGHT / 2 for i in range(n_ch)]
+    tick_texts = [label for _, label, _ in channels]
+    y_range    = [-0.8, (n_ch - 1) * CH_SPACING + CH_HEIGHT + 0.8]
+    fig.update_yaxes(
+        tickmode="array",
+        tickvals=tick_vals,
+        ticktext=tick_texts,
+        tickfont=dict(size=11),
+        range=y_range,
+        showgrid=True,
+        gridcolor="#e4e4e4",
+        gridwidth=1,
+        zeroline=False,
+        showline=True,
+        linecolor="#ccc",
+        row=row,
+        col=col,
+    )
+    fig.update_xaxes(
+        title_text="Time (µs)",
+        range=[0, period_us],
+        showgrid=True,
+        gridcolor="#e4e4e4",
+        gridwidth=1,
+        showline=True,
+        linecolor="#ccc",
+        row=row,
+        col=col,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main figure builder
 # ---------------------------------------------------------------------------
 
@@ -264,8 +379,6 @@ def plot_config(
         vertical_spacing=0.04,
     )
 
-    n_ch = len(channels)
-
     # ── Per-cycle-type timing diagrams ─────────────────────────────────────
     for ct_idx, ct in enumerate(cycle_types):
         row       = ct_idx + 1
@@ -273,87 +386,16 @@ def plot_config(
         period_us = seq_limit * us_per_cyc
         pulses    = _gather_pulses(ct)
 
-        for ch_idx, (key, label, color) in enumerate(channels):
-            # Channel 0 (RP) at the top → highest y_base
-            y_base    = (n_ch - 1 - ch_idx) * CH_SPACING
-            pulses_us = [(s * us_per_cyc, d * us_per_cyc) for s, d in pulses[key]]
-            x, y      = _waveform_xy(pulses_us, period_us, y_base)
-
-            # Main visual trace — no hover
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=y,
-                    mode="lines",
-                    name=label,
-                    legendgroup=key,
-                    showlegend=(ct_idx == 0),   # one legend entry per channel
-                    line=dict(color=color, width=2),
-                    fill="toself",
-                    fillcolor=_rgba(color, 0.20),
-                    hoverinfo="skip",
-                ),
-                row=row,
-                col=1,
-            )
-            # Dense invisible markers inside each pulse for reliable hover.
-            # hovermode="closest" snaps to these; hovertemplate works on markers.
-            if pulses_us:
-                hxs, hys, htmpl = [], [], []
-                for (s_raw, d_raw), (s_us, d_us) in zip(pulses[key], pulses_us):
-                    n    = max(3, min(50, d_raw // 5))
-                    tmpl = (f"<b>{label}</b><br>"
-                            f"{s_us:.4f} → {s_us + d_us:.4f} µs  ({d_raw} cyc)"
-                            "<extra></extra>")
-                    for i in range(n):
-                        hxs.append(s_us + (i + 0.5) * d_us / n)
-                        hys.append(y_base + CH_HEIGHT / 2)
-                        htmpl.append(tmpl)
-                fig.add_trace(
-                    go.Scatter(
-                        x=hxs, y=hys,
-                        mode="markers",
-                        marker=dict(size=8, color=_rgba(color, 0.01)),
-                        hovertemplate=htmpl,
-                        name=label,
-                        legendgroup=key,
-                        showlegend=False,
-                    ),
-                    row=row,
-                    col=1,
-                )
-
-        # Y-axis: tick at the midpoint of each channel's HIGH band
-        tick_vals  = [(n_ch - 1 - i) * CH_SPACING + CH_HEIGHT / 2 for i in range(n_ch)]
-        tick_texts = [label for _, label, _ in channels]
-        y_range    = [-0.8, (n_ch - 1) * CH_SPACING + CH_HEIGHT + 0.8]
-
-        fig.update_yaxes(
-            tickmode="array",
-            tickvals=tick_vals,
-            ticktext=tick_texts,
-            tickfont=dict(size=11),
-            range=y_range,
-            showgrid=True,
-            gridcolor="#e4e4e4",
-            gridwidth=1,
-            zeroline=False,
-            showline=True,
-            linecolor="#ccc",
-            row=row,
-            col=1,
+        pulses_us_by_key = {
+            key: [(s * us_per_cyc, d * us_per_cyc) for s, d in pulses[key]]
+            for key, *_ in channels
+        }
+        add_channel_traces(
+            fig, channels, pulses_us_by_key, period_us, clock_mhz,
+            row=row, col=1,
+            showlegend=(ct_idx == 0),
         )
-        fig.update_xaxes(
-            title_text="Time (µs)",
-            range=[0, period_us],
-            showgrid=True,
-            gridcolor="#e4e4e4",
-            gridwidth=1,
-            showline=True,
-            linecolor="#ccc",
-            row=row,
-            col=1,
-        )
+        configure_waveform_axes(fig, channels, period_us, row=row, col=1)
 
     # ── Sequence timeline strip ─────────────────────────────────────────────
     if has_strip:
