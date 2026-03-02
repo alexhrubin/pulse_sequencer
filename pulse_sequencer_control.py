@@ -377,9 +377,83 @@ def cmd_start_legacy(argv):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _parse_new_json(d: dict) -> SequencerConfig:
+    """
+    Parse the new JSON format (identified by the 'cycle_time' top-level key)
+    into a SequencerConfig.
+
+    New format keys:
+      cycle_time          — shared seq_limit for all cycle types
+      sync                — bool; if True adds PulseSlot(0, 5) to every cycle
+      super_cycle         — list of {cycle: name, count: N}
+      super_cycle_repeats — int (0 = infinite)
+      <name>: {...}       — cycle definition dicts
+    """
+    _RESERVED = {"cycle_time", "sync", "super_cycle", "super_cycle_repeats"}
+
+    cycle_time          = int(d["cycle_time"])
+    sync                = bool(d.get("sync", True))
+    super_cycle_repeats = int(d.get("super_cycle_repeats", 0))
+    super_cycle_steps   = d.get("super_cycle", [])
+
+    # Build cycle types in the order they first appear in super_cycle
+    name_to_idx: dict[str, int] = {}
+    cycle_type_list: list[CycleTypeDef] = []
+
+    for step in super_cycle_steps:
+        name = step["cycle"]
+        if name in name_to_idx:
+            continue
+        raw = d.get(name)
+        if raw is None or not isinstance(raw, dict):
+            raise ValueError(f"Cycle '{name}' referenced in super_cycle but not found in config")
+
+        rp   = [PulseSlot(int(s[0]), int(s[1])) for s in raw.get("rp",   []) if int(s[1]) > 0]
+        ro   = [PulseSlot(int(s[0]), int(s[1])) for s in raw.get("ro",   []) if int(s[1]) > 0]
+        mw   = [PulseSlot(int(s[0]), int(s[1])) for s in raw.get("mw",   []) if int(s[1]) > 0]
+        veto = [PulseSlot(int(s[0]), int(s[1])) for s in raw.get("veto", []) if int(s[1]) > 0]
+
+        sync_slot = PulseSlot(0, 5) if sync else PulseSlot()
+
+        markers = [PulseSlot() for _ in range(NUM_MARKERS)]
+        marker_ch = raw.get("marker")
+        if marker_ch is not None:
+            idx = int(marker_ch)
+            if 0 <= idx < NUM_MARKERS:
+                markers[idx] = PulseSlot(0, 5)
+
+        ct = CycleTypeDef(
+            seq_limit = cycle_time,
+            rp   = rp,
+            ro   = ro,
+            mw   = mw,
+            veto = veto,
+            sync = sync_slot,
+            markers = markers,
+        )
+        name_to_idx[name] = len(cycle_type_list)
+        cycle_type_list.append(ct)
+
+    sequence = [
+        SuperCycleStep(
+            cycle_type_index = name_to_idx[step["cycle"]],
+            count            = int(step.get("count", 1)),
+        )
+        for step in super_cycle_steps
+    ]
+
+    return SequencerConfig(
+        cycle_types        = cycle_type_list,
+        sequence           = sequence,
+        super_repeat_limit = super_cycle_repeats,
+    )
+
+
 def _load_json_config(path: str) -> SequencerConfig:
     with open(path) as f:
         d = json.load(f)
+    if "cycle_time" in d:
+        return _parse_new_json(d)
     return SequencerConfig.from_dict(d)
 
 
