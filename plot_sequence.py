@@ -325,7 +325,15 @@ def plot_config(
     show_sequence_strip: bool = True,
     hide_inactive: bool = False,
 ) -> go.Figure:
-    """Build and return an interactive Plotly Figure from a SequencerConfig dict."""
+    """Build and return an interactive Plotly Figure from a config dict.
+
+    Accepts the canonical JSON format (with 'cycle_time' key) as produced by
+    FPGAConfig.to_json().
+    """
+
+    # Convert from canonical JSON format to internal representation
+    if "cycle_time" in cfg:
+        cfg = _parse_new_format(cfg)
 
     us_per_cyc   = 1.0 / clock_mhz
     cycle_types  = cfg.get("cycle_types", [])
@@ -562,15 +570,6 @@ def main() -> None:
 
     with open(args.config) as f:
         cfg = json.load(f)
-
-    if "cycle_time" in cfg:
-        # New format: convert to internal representation
-        cfg = _parse_new_format(cfg)
-    elif "cycle_types" not in cfg:
-        sys.exit(
-            "Error: JSON file does not contain 'cycle_types' or 'cycle_time'.\n"
-            "Expected either the new format (cycle_time key) or the old SequencerConfig format."
-        )
 
     fig = plot_config(
         cfg,
