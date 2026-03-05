@@ -83,25 +83,25 @@ class PulseSequencer:
         """Upload config and write it to the FPGA (does not start)."""
         self._upload_config(config)
         self._exec(
-            f"python3 {self.REMOTE_SCRIPT} configure {self.REMOTE_CONFIG}"
+            f"python {self.REMOTE_SCRIPT} configure {self.REMOTE_CONFIG}"
         )
 
     def start(self) -> None:
         """Start the sequencer running the last uploaded config."""
         self._exec(
-            f"python3 {self.REMOTE_SCRIPT} start-super {self.REMOTE_CONFIG}"
+            f"python {self.REMOTE_SCRIPT} start-super {self.REMOTE_CONFIG}"
         )
 
     def stop(self) -> None:
         """Send a stop strobe to the sequencer."""
-        self._exec(f"python3 {self.REMOTE_SCRIPT} stop")
+        self._exec(f"python {self.REMOTE_SCRIPT} stop")
 
     def status(self) -> dict:
         """
         Query sequencer status.  Returns a dict of key→value strings
         parsed from the 'status' command output.
         """
-        out = self._exec(f"python3 {self.REMOTE_SCRIPT} status")
+        out = self._exec(f"python {self.REMOTE_SCRIPT} status")
         result: dict[str, str] = {}
         for line in out.splitlines():
             if ":" in line:
@@ -111,7 +111,7 @@ class PulseSequencer:
 
     def wait(self, poll: float = 0.05) -> None:
         """Block until the sequencer finishes (finite super_cycle_repeats)."""
-        self._exec(f"python3 {self.REMOTE_SCRIPT} wait {poll}")
+        self._exec(f"python {self.REMOTE_SCRIPT} wait {poll}")
 
     # ── Context manager ──────────────────────────────────────────────────────
 

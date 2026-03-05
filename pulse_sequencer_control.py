@@ -34,7 +34,7 @@ import time
 # ---------------------------------------------------------------------------
 # Hardware constants
 # ---------------------------------------------------------------------------
-COMPONENT_ADDR = 0xFF24000   # Base address of the Avalon-MM slave in /dev/mem
+COMPONENT_ADDR = 0xFF240000  # Base address of the Avalon-MM slave in /dev/mem
 SPAN           = 4096        # mmap window size (bytes)
 
 # FPGA parameters (must match RTL parameters)
