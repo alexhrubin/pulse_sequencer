@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+
+# Simulation outputs
+sim/generated_stimulus.v
+sim/supercycle_sim
+sim/seq_test
+sim/*.vcd
+sim/*.csv
+
+# Generated HTML timing diagrams
+*.html
+
+# JSON configs (generated, not source)
+*.json
+
+# Python/uv
+.venv/
+.python-version
+uv.lock
+
+# Jupyter
+.ipynb_checkpoints/
