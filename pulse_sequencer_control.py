@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """
 pulse_sequencer_control.py  --  NV center pulse sequencer control for DE10-Nano HPS
 
@@ -22,7 +22,7 @@ Legacy API (backward compatible, single experiment cycle):
         All values in FPGA clock cycles. REPEATS=0 or omitted = infinite.
         Maps to a single-step super-cycle using cycle type 0.
 """
-from __future__ import annotations
+from __future__ import print_function
 
 import contextlib
 import json
@@ -31,8 +31,6 @@ import os
 import struct
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import List, Optional
 
 # ---------------------------------------------------------------------------
 # Hardware constants
@@ -78,51 +76,53 @@ WORDS_PER_CYCLE = 1 + MAX_SLOTS * 8 + 2 + NUM_MARKERS * 2   # 137
 # Data model
 # ---------------------------------------------------------------------------
 
-@dataclass
 class PulseSlot:
     """One pulse window: start offset and duration, both in FPGA clock cycles.
     duration=0 disables this slot (produces no output)."""
-    start: int = 0
-    duration: int = 0  # 0 = disabled
 
-    def validate(self, seq_limit: int, name: str = "slot") -> list[str]:
+    def __init__(self, start=0, duration=0):
+        self.start = start
+        self.duration = duration
+
+    def validate(self, seq_limit, name="slot"):
         errs = []
         if self.duration < 0:
-            errs.append(f"{name}: duration must be >= 0")
+            errs.append("%s: duration must be >= 0" % name)
         if self.duration > 0 and self.start + self.duration > seq_limit:
-            errs.append(f"{name}: pulse extends past period end "
-                        f"({self.start} + {self.duration} > {seq_limit})")
+            errs.append("%s: pulse extends past period end "
+                        "(%d + %d > %d)" % (name, self.start, self.duration, seq_limit))
         return errs
 
 
-@dataclass
 class CycleTypeDef:
     """Configuration for one reusable cycle type, stored in one BRAM block."""
-    seq_limit: int = 5000                              # period length in cycles
-    rp: List[PulseSlot] = field(default_factory=list)  # up to MAX_SLOTS
-    ro: List[PulseSlot] = field(default_factory=list)
-    mw: List[PulseSlot] = field(default_factory=list)
-    veto: List[PulseSlot] = field(default_factory=list) # PicoHarp veto windows
-    sync: PulseSlot = field(default_factory=PulseSlot)  # single slot (dur=0→disabled)
-    markers: List[PulseSlot] = field(                   # one per marker output
-        default_factory=lambda: [PulseSlot() for _ in range(NUM_MARKERS)])
 
-    def validate(self, name: str = "cycle") -> list[str]:
+    def __init__(self, seq_limit=5000, rp=None, ro=None, mw=None, veto=None,
+                 sync=None, markers=None):
+        self.seq_limit = seq_limit
+        self.rp = rp if rp is not None else []
+        self.ro = ro if ro is not None else []
+        self.mw = mw if mw is not None else []
+        self.veto = veto if veto is not None else []
+        self.sync = sync if sync is not None else PulseSlot()
+        self.markers = markers if markers is not None else [PulseSlot() for _ in range(NUM_MARKERS)]
+
+    def validate(self, name="cycle"):
         errs = []
         if self.seq_limit < 1:
-            errs.append(f"{name}: seq_limit must be >= 1")
+            errs.append("%s: seq_limit must be >= 1" % name)
         for ch_name, slots in [("rp", self.rp), ("ro", self.ro),
                                 ("mw", self.mw), ("veto", self.veto)]:
             if len(slots) > MAX_SLOTS:
-                errs.append(f"{name}.{ch_name}: too many slots (max {MAX_SLOTS})")
+                errs.append("%s.%s: too many slots (max %d)" % (name, ch_name, MAX_SLOTS))
             for i, s in enumerate(slots):
-                errs.extend(s.validate(self.seq_limit, f"{name}.{ch_name}[{i}]"))
-        errs.extend(self.sync.validate(self.seq_limit, f"{name}.sync"))
+                errs.extend(s.validate(self.seq_limit, "%s.%s[%d]" % (name, ch_name, i)))
+        errs.extend(self.sync.validate(self.seq_limit, "%s.sync" % name))
         for i, m in enumerate(self.markers[:NUM_MARKERS]):
-            errs.extend(m.validate(self.seq_limit, f"{name}.marker{i}"))
+            errs.extend(m.validate(self.seq_limit, "%s.marker%d" % (name, i)))
         return errs
 
-    def to_words(self) -> list[int]:
+    def to_words(self):
         """Serialize to a flat list of WORDS_PER_CYCLE 32-bit integers."""
         words = [self.seq_limit]
         for slots in [self.rp, self.ro, self.mw, self.veto]:
@@ -136,11 +136,11 @@ class CycleTypeDef:
             slot = self.markers[m] if m < len(self.markers) else PulseSlot()
             words.append(slot.start)
             words.append(slot.duration)
-        assert len(words) == WORDS_PER_CYCLE, f"word count mismatch: {len(words)}"
+        assert len(words) == WORDS_PER_CYCLE, "word count mismatch: %d" % len(words)
         return words
 
     @classmethod
-    def from_dict(cls, d: dict) -> "CycleTypeDef":
+    def from_dict(cls, d):
         def slot(v):
             if v is None:
                 return PulseSlot()
@@ -152,49 +152,51 @@ class CycleTypeDef:
             mw=[slot(s) for s in d.get("mw", [])],
             veto=[slot(s) for s in d.get("veto", [])],
             sync=slot(d.get("sync")),
-            markers=[slot(d.get(f"marker{i}")) for i in range(NUM_MARKERS)],
+            markers=[slot(d.get("marker%d" % i)) for i in range(NUM_MARKERS)],
         )
 
 
-@dataclass
 class SuperCycleStep:
     """One entry in the super-cycle sequence."""
-    cycle_type_index: int   # index into cycle_types (0..MAX_CYCLE_TYPES-1)
-    count: int = 1          # how many times to run this cycle type in a row
+
+    def __init__(self, cycle_type_index, count=1):
+        self.cycle_type_index = cycle_type_index
+        self.count = count
 
 
-@dataclass
 class SequencerConfig:
     """Complete configuration for the pulse sequencer."""
-    cycle_types: List[CycleTypeDef]    # library of unique cycle type definitions
-    sequence: List[SuperCycleStep]     # ordered steps forming one super-cycle
-    super_repeat_limit: int = 0        # 0 = infinite
+
+    def __init__(self, cycle_types, sequence, super_repeat_limit=0):
+        self.cycle_types = cycle_types
+        self.sequence = sequence
+        self.super_repeat_limit = super_repeat_limit
 
     def validate(self):
         errs = []
         if not self.cycle_types:
             errs.append("cycle_types must not be empty")
         if len(self.cycle_types) > MAX_CYCLE_TYPES:
-            errs.append(f"too many cycle types (max {MAX_CYCLE_TYPES})")
+            errs.append("too many cycle types (max %d)" % MAX_CYCLE_TYPES)
         if not self.sequence:
             errs.append("sequence must not be empty")
         if len(self.sequence) > MAX_SEQ_LEN:
-            errs.append(f"sequence too long (max {MAX_SEQ_LEN})")
+            errs.append("sequence too long (max %d)" % MAX_SEQ_LEN)
         if self.super_repeat_limit < 0:
             errs.append("super_repeat_limit must be >= 0 (0=infinite)")
         for i, ct in enumerate(self.cycle_types):
-            errs.extend(ct.validate(f"cycle_type[{i}]"))
+            errs.extend(ct.validate("cycle_type[%d]" % i))
         for j, step in enumerate(self.sequence):
             if step.cycle_type_index >= len(self.cycle_types):
-                errs.append(f"sequence[{j}].cycle_type_index "
-                            f"{step.cycle_type_index} out of range")
+                errs.append("sequence[%d].cycle_type_index "
+                            "%d out of range" % (j, step.cycle_type_index))
             if step.count < 1:
-                errs.append(f"sequence[{j}].count must be >= 1")
+                errs.append("sequence[%d].count must be >= 1" % j)
         if errs:
             raise ValueError("\n".join(errs))
 
     @classmethod
-    def from_dict(cls, d: dict) -> "SequencerConfig":
+    def from_dict(cls, d):
         cts = [CycleTypeDef.from_dict(c) for c in d.get("cycle_types", [])]
         seq = [SuperCycleStep(cycle_type_index=s["cycle_type_index"],
                               count=s.get("count", 1))
@@ -209,11 +211,11 @@ class SequencerConfig:
 # Byte offset = word_addr * 4.
 # ---------------------------------------------------------------------------
 
-def _write(mem, word_addr: int, value: int):
+def _write(mem, word_addr, value):
     off = word_addr * 4
     mem[off:off + 4] = struct.pack('<I', value & 0xFFFFFFFF)
 
-def _read(mem, word_addr: int) -> int:
+def _read(mem, word_addr):
     off = word_addr * 4
     return struct.unpack('<I', mem[off:off + 4])[0]
 
@@ -236,7 +238,7 @@ def fpga_mem():
 # BRAM and register file writers
 # ---------------------------------------------------------------------------
 
-def write_cycle_type(mem, idx: int, defn: CycleTypeDef):
+def write_cycle_type(mem, idx, defn):
     """Write one cycle type definition to its BRAM block."""
     words = defn.to_words()
     base  = idx * BRAM_WORDS_PER_CYCLE
@@ -245,7 +247,7 @@ def write_cycle_type(mem, idx: int, defn: CycleTypeDef):
         _write(mem, REG_BRAM_DATA, w)   # auto-increments BRAM pointer
 
 
-def write_config(mem, cfg: SequencerConfig):
+def write_config(mem, cfg):
     """Write complete sequencer configuration. Does not start the sequencer."""
     _write(mem, REG_SUPER_LIMIT, cfg.super_repeat_limit)
     _write(mem, REG_SEQ_LEN, len(cfg.sequence))
@@ -313,16 +315,16 @@ def cmd_status(argv):
     prefetch_busy   = bool((status_ext >> 5) & 1)
     seq_pos         = status_ext & 0x1F
 
-    print(f"running:            {running}")
-    print(f"active_bank:        {int(active_bank)}")
-    print(f"prefetch_busy:      {prefetch_busy}")
-    print(f"seq_pos:            {seq_pos}")
-    print(f"timer_snapshot:     {timer_snap}")
-    print(f"super_repeat_limit: {super_limit}  (0=infinite)")
-    print(f"super_repeat_count: {super_count}")
-    print(f"sequence ({seq_len} steps):")
+    print("running:            %s" % running)
+    print("active_bank:        %d" % int(active_bank))
+    print("prefetch_busy:      %s" % prefetch_busy)
+    print("seq_pos:            %d" % seq_pos)
+    print("timer_snapshot:     %d" % timer_snap)
+    print("super_repeat_limit: %d  (0=infinite)" % super_limit)
+    print("super_repeat_count: %d" % super_count)
+    print("sequence (%d steps):" % seq_len)
     for j in range(seq_len):
-        print(f"  [{j}] cycle_type={seq_types[j]}  count={seq_counts[j]}")
+        print("  [%d] cycle_type=%d  count=%d" % (j, seq_types[j], seq_counts[j]))
 
 
 def cmd_wait(argv):
@@ -377,28 +379,26 @@ def cmd_start_legacy(argv):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_new_json(d: dict) -> SequencerConfig:
+def _parse_new_json(d):
     """
     Parse the new JSON format (identified by the 'cycle_time' top-level key)
     into a SequencerConfig.
 
     New format keys:
-      cycle_time          — shared seq_limit for all cycle types
-      sync                — bool; if True adds PulseSlot(0, 5) to every cycle
-      super_cycle         — list of {cycle: name, count: N}
-      super_cycle_repeats — int (0 = infinite)
-      <name>: {...}       — cycle definition dicts
+      cycle_time          -- shared seq_limit for all cycle types
+      sync                -- bool; if True adds PulseSlot(0, 5) to every cycle
+      super_cycle         -- list of {cycle: name, count: N}
+      super_cycle_repeats -- int (0 = infinite)
+      <name>: {...}       -- cycle definition dicts
     """
-    _RESERVED = {"cycle_time", "sync", "super_cycle", "super_cycle_repeats"}
-
     cycle_time          = int(d["cycle_time"])
     sync                = bool(d.get("sync", True))
     super_cycle_repeats = int(d.get("super_cycle_repeats", 0))
     super_cycle_steps   = d.get("super_cycle", [])
 
     # Build cycle types in the order they first appear in super_cycle
-    name_to_idx: dict[str, int] = {}
-    cycle_type_list: list[CycleTypeDef] = []
+    name_to_idx = {}
+    cycle_type_list = []
 
     for step in super_cycle_steps:
         name = step["cycle"]
@@ -406,7 +406,7 @@ def _parse_new_json(d: dict) -> SequencerConfig:
             continue
         raw = d.get(name)
         if raw is None or not isinstance(raw, dict):
-            raise ValueError(f"Cycle '{name}' referenced in super_cycle but not found in config")
+            raise ValueError("Cycle '%s' referenced in super_cycle but not found in config" % name)
 
         rp   = [PulseSlot(int(s[0]), int(s[1])) for s in raw.get("rp",   []) if int(s[1]) > 0]
         ro   = [PulseSlot(int(s[0]), int(s[1])) for s in raw.get("ro",   []) if int(s[1]) > 0]
@@ -449,7 +449,7 @@ def _parse_new_json(d: dict) -> SequencerConfig:
     )
 
 
-def _load_json_config(path: str) -> SequencerConfig:
+def _load_json_config(path):
     with open(path) as f:
         d = json.load(f)
     if "cycle_time" in d:
@@ -471,7 +471,7 @@ COMMANDS = {
 
 def _usage_error(msg=None):
     if msg:
-        print(f"Error: {msg}\n", file=sys.stderr)
+        print("Error: %s\n" % msg, file=sys.stderr)
     print(__doc__.strip(), file=sys.stderr)
     sys.exit(1)
 
@@ -481,5 +481,5 @@ if __name__ == '__main__':
     try:
         COMMANDS[sys.argv[1]](sys.argv[2:])
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print("Error: %s" % e, file=sys.stderr)
         sys.exit(1)
