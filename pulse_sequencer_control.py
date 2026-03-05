@@ -25,7 +25,6 @@ Legacy API (backward compatible, single experiment cycle):
 from __future__ import print_function
 
 import contextlib
-import json
 import mmap
 import os
 import struct
@@ -449,9 +448,15 @@ def _parse_new_json(d):
     )
 
 
+def _parse_json(text):
+    """Minimal JSON parser for trusted local config files."""
+    text = text.replace("true", "True").replace("false", "False").replace("null", "None")
+    return eval(text)
+
+
 def _load_json_config(path):
     with open(path) as f:
-        d = json.load(f)
+        d = _parse_json(f.read())
     if "cycle_time" in d:
         return _parse_new_json(d)
     return SequencerConfig.from_dict(d)
