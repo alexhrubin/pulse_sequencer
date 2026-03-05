@@ -384,7 +384,7 @@ def plot_config(
         shared_xaxes=False,
         subplot_titles=subplot_titles,
         row_heights=row_heights,
-        vertical_spacing=0.04,
+        vertical_spacing=0.2,
     )
 
     # ── Per-cycle-type timing diagrams ─────────────────────────────────────
